@@ -7,6 +7,7 @@ Run:  streamlit run app.py
 import os
 import sys
 import time
+import html
 import threading
 from dotenv import load_dotenv
 
@@ -587,14 +588,14 @@ def render_inbox_tab():
         unread_class = "mail-unread" if is_unread else ""
         unread_dot = "●&nbsp;" if is_unread else "&nbsp;&nbsp;"
 
-        html = f"""
+        mail_html = f"""
         <div class="mail-item {unread_class}">
-          <div class="mail-subject">{unread_dot}{m.subject or '(no subject)'}</div>
-          <div class="mail-sender">{m.sender} · {m.date}</div>
-          <div class="mail-snippet">{m.snippet[:120]}</div>
+          <div class="mail-subject">{unread_dot}{html.escape(m.subject or '(no subject)')}</div>
+          <div class="mail-sender">{html.escape(m.sender)} · {html.escape(m.date)}</div>
+          <div class="mail-snippet">{html.escape(m.snippet[:120])}</div>
         </div>
         """
-        st.markdown(html, unsafe_allow_html=True)
+        st.markdown(mail_html, unsafe_allow_html=True)
 
         col1, col2, col3 = st.columns([2, 2, 6])
         with col1:
@@ -617,10 +618,10 @@ def render_inbox_tab():
                 body = data["body_text"] or data["body_html"] or "(empty)"
                 st.markdown(f"""
                 <div class="oc-card oc-card-accent">
-                  <div style="font-family:'Syne',sans-serif;font-size:1rem;font-weight:700;color:#e6edf3">{meta.subject}</div>
-                  <div style="color:#8b949e;font-size:0.8rem;margin:4px 0">From: {meta.sender} · {meta.date}</div>
+                  <div style="font-family:'Syne',sans-serif;font-size:1rem;font-weight:700;color:#e6edf3">{html.escape(meta.subject or '')}</div>
+                  <div style="color:#8b949e;font-size:0.8rem;margin:4px 0">From: {html.escape(meta.sender or '')} · {html.escape(meta.date or '')}</div>
                   <hr style="border-color:#21262d">
-                  <pre style="white-space:pre-wrap;font-size:0.82rem;color:#c9d1d9;font-family:'DM Mono',monospace">{body[:3000]}</pre>
+                  <pre style="white-space:pre-wrap;font-size:0.82rem;color:#c9d1d9;font-family:'DM Mono',monospace">{html.escape(body[:3000])}</pre>
                 </div>
                 """, unsafe_allow_html=True)
             except Exception as e:
