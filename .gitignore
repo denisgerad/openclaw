@@ -1,0 +1,14 @@
+# Auth & secrets — never commit these
+.env
+config/credentials.json
+config/token.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Logs
+*.log
