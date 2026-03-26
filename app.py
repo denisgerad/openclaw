@@ -194,18 +194,22 @@ st.markdown("""
 
 def init_session():
     defaults = {
-        "router_state":   "idle",     # idle | planning | running | hil_pending | complete | error
-        "bundle":         None,
-        "gmail":          None,
-        "web_search":     None,
-        "router":         None,
-        "agent_log":      [],          # list of log strings
-        "task_input":     "",
-        "hil_edit_text":  "",
-        "inbox_cache":    [],
-        "inbox_loaded":   False,
-        "selected_mail":  None,
-        "active_tab":     "task",
+        "router_state":      "idle",     # idle | planning | running | hil_pending | complete | error
+        "bundle":            None,
+        "gmail":             None,
+        "web_search":        None,
+        "calendar":          None,
+        "router":            None,
+        "agent_log":         [],          # list of log strings
+        "task_input":        "",
+        "hil_edit_text":     "",
+        "inbox_cache":       [],
+        "inbox_loaded":      False,
+        "selected_mail":     None,
+        "active_tab":        "task",
+        "cal_events_cache":  [],
+        "cal_loaded":        False,
+        "cal_selected_id":   None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -229,9 +233,15 @@ def get_web_search():
 
 
 @st.cache_resource(show_spinner=False)
-def get_router(_gmail, _web_search):
+def get_calendar():
+    from orchestrator.connectors.calendar import CalendarConnector
+    return CalendarConnector()
+
+
+@st.cache_resource(show_spinner=False)
+def get_router(_gmail, _web_search, _calendar):
     from orchestrator.streamlit_router import StreamlitRouter
-    return StreamlitRouter(gmail=_gmail, web_search=_web_search)
+    return StreamlitRouter(gmail=_gmail, web_search=_web_search, calendar=_calendar)
 
 
 def ensure_connectors():
@@ -246,10 +256,17 @@ def ensure_connectors():
             st.session_state.web_search = get_web_search()
         except Exception as e:
             return False, str(e)
+    if st.session_state.get("calendar") is None:
+        try:
+            st.session_state.calendar = get_calendar()
+        except Exception as e:
+            st.session_state.calendar = None  # Calendar is optional
     if st.session_state.router is None:
         try:
             st.session_state.router = get_router(
-                st.session_state.gmail, st.session_state.web_search
+                st.session_state.gmail,
+                st.session_state.web_search,
+                st.session_state.get("calendar"),
             )
         except Exception as e:
             return False, str(e)
@@ -276,7 +293,8 @@ def render_sidebar():
         gmail_ok = st.session_state.gmail is not None
         search_ok = st.session_state.web_search is not None
 
-        col1, col2 = st.columns(2)
+        cal_ok = st.session_state.get("calendar") is not None
+        col1, col2, col3 = st.columns(3)
         with col1:
             if gmail_ok:
                 st.markdown('<span class="badge badge-green">✓ Gmail</span>', unsafe_allow_html=True)
@@ -287,6 +305,11 @@ def render_sidebar():
                 st.markdown('<span class="badge badge-green">✓ Tavily</span>', unsafe_allow_html=True)
             else:
                 st.markdown('<span class="badge badge-red">✗ Tavily</span>', unsafe_allow_html=True)
+        with col3:
+            if cal_ok:
+                st.markdown('<span class="badge badge-green">✓ Calendar</span>', unsafe_allow_html=True)
+            else:
+                st.markdown('<span class="badge badge-yellow">○ Calendar</span>', unsafe_allow_html=True)
 
         st.divider()
 
@@ -316,6 +339,8 @@ def render_sidebar():
         quick_tasks = [
             "Summarise my 5 latest unread emails",
             "Find emails from last week and list them",
+            "Show my calendar for this week",
+            "Find a free 1-hour slot this week for a team meeting",
             "Search for any invoice emails",
             "Find unread emails and draft replies",
         ]
@@ -419,15 +444,21 @@ def _render_hil_panel():
     if not b:
         return
 
-    is_delete = b.draft_action in ("delete", "trash")
+    action    = b.draft_action or ""
+    is_delete = action in ("delete", "trash", "delete_event")
+    is_cal    = action in ("create_event", "update_event", "delete_event", "rsvp")
+
+    action_color = {"delete": "#f85149", "trash": "#f85149", "delete_event": "#f85149"}.get(action, "#d29922")
+    action_icon  = {"create_event": "📅", "update_event": "✏️", "delete_event": "🗑️", "rsvp": "✋"}.get(action, "⚠️")
 
     st.markdown(f"""
     <div class="hil-panel">
-      <div class="hil-title">⏸️ Human Approval Required — {b.draft_action.upper() if b.draft_action else ""}</div>
+      <div class="hil-title">{action_icon} Human Approval Required — {action.upper()}</div>
     </div>
     """, unsafe_allow_html=True)
 
-    if b.active_mail:
+    # ── Mail context ────────────────────────────────────────────
+    if b.active_mail and not is_cal:
         m = b.active_mail
         col1, col2 = st.columns(2)
         with col1:
@@ -439,8 +470,65 @@ def _render_hil_panel():
 
     st.divider()
 
-    if is_delete:
+    # ── Calendar action preview ───────────────────────────────────────────
+    if is_cal:
+        import json as _json
+        try:
+            payload = _json.loads(b.draft_content or "{}")
+        except Exception:
+            payload = {}
+
+        if action == "create_event":
+            st.markdown("📅 **New event to be created:**")
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown(f"**Title:** {payload.get('title', '')}")
+                st.markdown(f"**Start:** {payload.get('start', '')}")
+                st.markdown(f"**End:**   {payload.get('end', '')}")
+                st.markdown(f"**Calendar:** {payload.get('calendar_id', 'primary')}")
+            with c2:
+                if payload.get("location"):
+                    st.markdown(f"**Location:** {payload['location']}")
+                if payload.get("attendees"):
+                    st.markdown(f"**Attendees:** {', '.join(payload['attendees'])}")
+                if payload.get("add_google_meet"):
+                    st.markdown("**Google Meet:** will be created")
+                if payload.get("recurrence"):
+                    st.markdown(f"**Recurrence:** {payload['recurrence'][0]}")
+            if payload.get("description"):
+                st.markdown(f"**Description:** {payload['description']}")
+
+        elif action == "update_event":
+            st.markdown(f"✏️ **Event update — ID:** `{payload.get('event_id', '')}`")
+            updates = payload.get("updates", {})
+            if updates:
+                st.json(updates)
+
+        elif action == "delete_event":
+            st.error(f"⚠️ **Delete event ID:** `{payload.get('event_id', '')}`  — This cannot be undone.", icon="🗑️")
+
+        elif action == "rsvp":
+            resp = payload.get("response", "")
+            resp_color = {"accepted": "🟢", "declined": "🔴", "tentative": "🟡"}.get(resp, "⬜")
+            st.markdown(f"**RSVP** {resp_color} **{resp.upper()}** for event `{payload.get('event_id', '')}`")
+
+        # Editable JSON for create/update
+        if action in ("create_event", "update_event"):
+            with st.expander("✎ Edit event details (advanced)"):
+                edited_json = st.text_area(
+                    "Edit JSON payload",
+                    value=b.draft_content or "",
+                    height=250,
+                    key="hil_draft_edit",
+                )
+                st.session_state.hil_edit_text = edited_json
+        else:
+            st.session_state.hil_edit_text = b.draft_content or ""
+
+    # ── Mail draft preview ────────────────────────────────────────────
+    elif is_delete:
         st.warning(f"⚠️ This will move **{b.draft_target_id}** to Trash. Recoverable within 30 days.", icon="🗑️")
+        st.session_state.hil_edit_text = b.draft_content or ""
     else:
         st.markdown("**Draft to be sent:**")
         hil_edit = st.text_area(
@@ -471,7 +559,8 @@ def _render_hil_panel():
             _hil_decision("rejected")
             st.rerun()
 
-    if not is_delete:
+    allow_edit = not is_delete or action in ("create_event", "update_event")
+    if allow_edit:
         with col_e:
             if st.button("✎ Approve edited", use_container_width=True):
                 _hil_decision("edited")
@@ -628,6 +717,226 @@ def render_inbox_tab():
                 st.error(f"Could not fetch message: {e}")
 
 
+# ── Calendar tab ──────────────────────────────────────────────────────────────
+
+def render_calendar_tab():
+    st.markdown("### Calendar")
+
+    calendar = st.session_state.get("calendar")
+    if not calendar:
+        st.warning(
+            "⚠️ Google Calendar not connected. "
+            "Ensure your `config/token.json` includes Calendar scopes — "
+            "delete the existing token and restart to re-consent.",
+            icon="📅",
+        )
+        return
+
+    # ── Controls row ──────────────────────────────────────────────────────────
+    col_view, col_cal, col_load = st.columns([2, 3, 1])
+    with col_view:
+        view = st.selectbox(
+            "View",
+            ["Today", "This week", "Next 7 days", "Next 30 days", "Custom"],
+            label_visibility="collapsed",
+        )
+    with col_cal:
+        cal_id = st.text_input(
+            "Calendar ID", value="primary",
+            placeholder="primary or calendar ID",
+            label_visibility="collapsed",
+        )
+    with col_load:
+        load_btn = st.button("📅 Load", type="primary", use_container_width=True)
+
+    # Date range picker for custom view
+    custom_range = None
+    if view == "Custom":
+        cc1, cc2 = st.columns(2)
+        with cc1:
+            d_from = st.date_input("From")
+        with cc2:
+            d_to = st.date_input("To")
+        custom_range = (d_from, d_to)
+
+    # Search bar
+    search_q = st.text_input(
+        "Search events",
+        placeholder="Search by title, attendee, location...",
+        label_visibility="collapsed",
+    )
+
+    if load_btn or not st.session_state.cal_loaded:
+        with st.spinner("Loading calendar..."):
+            try:
+                from datetime import datetime, timedelta, timezone as tz_mod
+                now = datetime.now(tz=tz_mod.utc)
+
+                time_min, time_max = None, None
+                if view == "Today":
+                    time_min = now.replace(hour=0,  minute=0,  second=0).isoformat()
+                    time_max = now.replace(hour=23, minute=59, second=59).isoformat()
+                elif view == "This week":
+                    monday   = now - timedelta(days=now.weekday())
+                    time_min = monday.replace(hour=0, minute=0, second=0).isoformat()
+                    time_max = (monday + timedelta(days=6, hours=23, minutes=59)).isoformat()
+                elif view == "Next 7 days":
+                    time_max = (now + timedelta(days=7)).isoformat()
+                elif view == "Next 30 days":
+                    time_max = (now + timedelta(days=30)).isoformat()
+                elif custom_range:
+                    from datetime import date
+                    time_min = datetime.combine(custom_range[0], datetime.min.time()).isoformat() + "Z"
+                    time_max = datetime.combine(custom_range[1], datetime.max.time()).isoformat() + "Z"
+
+                if search_q.strip():
+                    events = calendar.search_events(query=search_q, calendar_id=cal_id, max_results=50)
+                else:
+                    events = calendar.list_events(
+                        calendar_id=cal_id, time_min=time_min,
+                        time_max=time_max, max_results=50,
+                    )
+                st.session_state.cal_events_cache = events
+                st.session_state.cal_loaded = True
+            except Exception as e:
+                st.error(f"Error loading calendar: {e}")
+                return
+
+    events = st.session_state.cal_events_cache
+
+    # ── Mini stats row ────────────────────────────────────────────────────────
+    total     = len(events)
+    with_meet = sum(1 for e in events if e.meet_link)
+    all_day   = sum(1 for e in events if e.all_day)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Events", total)
+    m2.metric("With Meet link", with_meet)
+    m3.metric("All day", all_day)
+
+    st.divider()
+
+    if not events:
+        st.info("No events found for this period.")
+        return
+
+    # ── Event list ────────────────────────────────────────────────────────────
+    for ev in events:
+        tz_str = calendar.default_tz
+        time_str = ev.friendly_time(tz_str)
+        recur_badge = " 🔁" if ev.recurrence else ""
+        meet_badge  = " 🎥" if ev.meet_link else ""
+        attendee_ct = f" 👥{len(ev.attendees)}" if ev.attendees else ""
+
+        strip_color = {
+            "confirmed":  "#3fb950",
+            "tentative":  "#d29922",
+            "cancelled":  "#f85149",
+        }.get(ev.status, "#58a6ff")
+
+        ev_html = f"""
+        <div class="oc-card" style="border-left:3px solid {strip_color};margin-bottom:0.5rem">
+          <div style="font-family:'Syne',sans-serif;font-size:0.95rem;font-weight:700;color:#e6edf3">
+            {ev.title}{recur_badge}{meet_badge}{attendee_ct}
+          </div>
+          <div style="color:#8b949e;font-size:0.8rem;margin:3px 0">{time_str}</div>
+          {"<div style='color:#6e7681;font-size:0.78rem'>📍 " + ev.location + "</div>" if ev.location else ""}
+          {"<div style='color:#6e7681;font-size:0.78rem'>👥 " + ", ".join(ev.attendees[:4]) + ("..." if len(ev.attendees) > 4 else "") + "</div>" if ev.attendees else ""}
+        </div>
+        """
+        st.markdown(ev_html, unsafe_allow_html=True)
+
+        col1, col2, col3, col4 = st.columns([1, 1, 1, 5])
+        with col1:
+            if st.button("Detail", key=f"det_{ev.event_id}"):
+                st.session_state.cal_selected_id = ev.event_id
+        with col2:
+            if st.button("→ Task", key=f"caltask_{ev.event_id}"):
+                st.session_state.task_input = f"Review the event '{ev.title}' and help me prepare"
+                st.rerun()
+        with col3:
+            if ev.meet_link:
+                st.link_button("Join 🎥", ev.meet_link)
+
+    # ── Event detail panel ────────────────────────────────────────────────────
+    if st.session_state.cal_selected_id:
+        selected = next(
+            (e for e in events if e.event_id == st.session_state.cal_selected_id), None
+        )
+        if selected:
+            st.divider()
+            st.markdown(f"""
+            <div class="oc-card oc-card-accent">
+              <div style="font-family:'Syne',sans-serif;font-size:1.1rem;font-weight:700;color:#e6edf3">{selected.title}</div>
+              <div style="color:#8b949e;font-size:0.82rem;margin:6px 0">{selected.friendly_time(calendar.default_tz)}</div>
+              {"<div style='margin-top:6px;color:#c9d1d9;font-size:0.85rem'>" + selected.description[:400] + "</div>" if selected.description else ""}
+              {"<div style='margin-top:6px;font-size:0.82rem'>📍 " + selected.location + "</div>" if selected.location else ""}
+              {"<div style='margin-top:6px;font-size:0.82rem'>👥 " + ", ".join(selected.attendees) + "</div>" if selected.attendees else ""}
+              {"<div style='margin-top:6px;font-size:0.82rem'>🎥 <a href=\"" + selected.meet_link + "\" target=\"_blank\">Join Google Meet</a></div>" if selected.meet_link else ""}
+              <div style="margin-top:8px;font-size:0.75rem;color:#6e7681">Event ID: {selected.event_id}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.markdown("**Quick actions for this event:**")
+            qa_cols = st.columns(4)
+            quick = [
+                ("Draft agenda",   f"Draft a meeting agenda for the event '{selected.title}' scheduled for {selected.friendly_time(calendar.default_tz)}"),
+                ("Reschedule",     f"Help me reschedule the event '{selected.title}' (ID: {selected.event_id}) to a better time"),
+                ("Add attendee",   f"Add an attendee to event '{selected.title}' (ID: {selected.event_id})"),
+                ("Cancel event",   f"Cancel and delete the event '{selected.title}' (ID: {selected.event_id})"),
+            ]
+            for col, (label, task) in zip(qa_cols, quick):
+                with col:
+                    if st.button(label, key=f"qa_{label}_{selected.event_id}", use_container_width=True):
+                        st.session_state.task_input = task
+                        st.rerun()
+
+    # ── Free/Busy checker ─────────────────────────────────────────────────────
+    st.divider()
+    with st.expander("🔍 Find a free meeting slot"):
+        fb_emails = st.text_input(
+            "Attendee emails (comma-separated)",
+            placeholder="alice@example.com, bob@example.com",
+            key="fb_emails",
+        )
+        fb_duration = st.slider("Meeting duration (minutes)", 15, 180, 60, 15)
+        fb_days     = st.slider("Look ahead (days)", 1, 14, 7)
+        fb_tz       = st.text_input("Timezone", value=calendar.default_tz, key="fb_tz")
+
+        if st.button("Find free slots", type="primary"):
+            emails = [e.strip() for e in fb_emails.split(",") if e.strip()]
+            if not emails:
+                st.warning("Enter at least one email address.")
+            else:
+                with st.spinner("Checking availability..."):
+                    try:
+                        slots = calendar.find_free_slots(
+                            emails=emails,
+                            duration_minutes=fb_duration,
+                            days_ahead=fb_days,
+                            timezone=fb_tz,
+                        )
+                        if not slots:
+                            st.info("No free slots found in this window.")
+                        else:
+                            st.success(f"Found {len(slots)} available slot(s):")
+                            for i, s in enumerate(slots, 1):
+                                col_a, col_b = st.columns([3, 1])
+                                with col_a:
+                                    st.markdown(f"**{i}.** {s['day']}  —  {s['time']}")
+                                with col_b:
+                                    task_str = (
+                                        f"Schedule a {fb_duration}-minute meeting with "
+                                        f"{', '.join(emails)} on {s['day']} at {s['time']}. "
+                                        f"Start: {s['start']}  End: {s['end']}"
+                                    )
+                                    if st.button("Schedule →", key=f"sched_{i}", use_container_width=True):
+                                        st.session_state.task_input = task_str
+                                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Free/busy check failed: {e}")
+
+
 # ── History tab ───────────────────────────────────────────────────────────────
 
 def render_history_tab():
@@ -686,13 +995,15 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-    tab1, tab2, tab3 = st.tabs(["⚡ Task", "📬 Inbox", "📋 History"])
+    tab1, tab2, tab3, tab4 = st.tabs(["⚡ Task", "📬 Inbox", "📅 Calendar", "📋 History"])
 
     with tab1:
         render_task_tab()
     with tab2:
         render_inbox_tab()
     with tab3:
+        render_calendar_tab()
+    with tab4:
         render_history_tab()
 
 

@@ -28,7 +28,9 @@ from orchestrator.verifier import Verifier
 from orchestrator.debugger import Debugger, FailureType, RecoveryAction
 from orchestrator.connectors.gmail import GmailConnector
 from orchestrator.connectors.web_search import WebSearchConnector
+from orchestrator.connectors.calendar import CalendarConnector
 from agent.tools.mail_tools import MailToolExecutor, MAIL_TOOL_SCHEMAS
+from agent.tools.calendar_tools import CalendarToolExecutor, CALENDAR_TOOL_SCHEMAS
 from hil.cli_approver import requires_hil, execute_approved_action
 
 ORCHESTRATOR_MODEL = os.getenv("MISTRAL_ORCHESTRATOR_MODEL", "mistral-large-latest")
@@ -47,7 +49,7 @@ class RouterState(str, Enum):
 
 
 def _build_agent_system(bundle: ContextBundle) -> str:
-    return f"""You are OpenClaw's execution agent — an intelligent email automation assistant.
+    return f"""You are OpenClaw's execution agent — an intelligent email and calendar automation assistant.
 
 Your goal: {bundle.task_goal}
 
@@ -55,17 +57,24 @@ Orchestrator plan:
 {bundle.orchestrator_notes}
 
 Available tools:
-  READ (auto-execute, no approval):
+  EMAIL — READ (auto-execute, no approval):
     list_inbox, search_mail, read_message, read_thread, web_search
-  WRITE (human approval required — stage only):
-    stage_reply, stage_delete
+  EMAIL — WRITE (human approval required — stage only):
+    stage_reply, stage_delete, stage_new_email
+
+  CALENDAR — READ (auto-execute, no approval):
+    list_calendars, list_events, get_event, search_events,
+    check_free_busy, find_free_slots
+  CALENDAR — WRITE (human approval required — stage only):
+    stage_create_event, stage_update_event, stage_delete_event, stage_rsvp
 
 Rules:
-1. Read before write. Always fetch thread context before staging a reply.
-2. Use web_search if you need external facts to compose an accurate reply.
-3. stage_reply / stage_delete only STAGES the action — it does NOT execute.
-4. One tool per turn. Check results before proceeding.
-5. When done, respond with TASK_COMPLETE followed by a brief summary.
+1. Read before write. Fetch context before staging any action.
+2. For scheduling: use find_free_slots first if no time is specified, then stage_create_event.
+3. stage_* tools only STAGE the action — nothing executes until the human approves.
+4. Parse natural-language times into ISO 8601 (e.g. "tomorrow 11am" → correct date + time).
+5. One tool per turn. Check results before proceeding.
+6. When done, respond with TASK_COMPLETE followed by a brief summary.
 
 Execution history:
 {bundle.history_summary()}
@@ -89,11 +98,13 @@ class StreamlitRouter:
         self,
         gmail: GmailConnector,
         web_search: WebSearchConnector,
+        calendar: Optional[CalendarConnector] = None,
         mistral: Optional[Mistral] = None,
     ):
         self.mistral    = mistral or Mistral(api_key=os.getenv("MISTRAL_API_KEY"))
         self.gmail      = gmail
         self.web_search = web_search
+        self.calendar   = calendar
         self.planner    = Planner(self.mistral)
         self.verifier   = Verifier(self.mistral)
         self.debugger   = Debugger(self.mistral)
@@ -147,7 +158,7 @@ class StreamlitRouter:
             if decision == "edited" and edited_content:
                 bundle.draft_content = edited_content
             log(f"✅ **HIL approved** — executing `{bundle.draft_action}`")
-            execute_approved_action(bundle, gmail=self.gmail)
+            execute_approved_action(bundle, gmail=self.gmail, calendar=self.calendar)
 
         elif decision == "rejected":
             log("❌ **HIL rejected** — analysing failure...")
@@ -177,11 +188,27 @@ class StreamlitRouter:
         log: Callable,
     ) -> RouterState:
         """Run agent loop; return state when HIL pause or completion."""
-        executor = MailToolExecutor(
+        mail_executor = MailToolExecutor(
             gmail=self.gmail,
             web_search=self.web_search,
             bundle=bundle,
         )
+        cal_executor = CalendarToolExecutor(
+            calendar=self.calendar,
+            bundle=bundle,
+        ) if self.calendar else None
+
+        # Build combined tool schemas
+        all_schemas = list(MAIL_TOOL_SCHEMAS)
+        if cal_executor:
+            all_schemas += CALENDAR_TOOL_SCHEMAS
+
+        def execute_tool(name, args):
+            # Route to correct executor
+            cal_tools = {s["function"]["name"] for s in CALENDAR_TOOL_SCHEMAS}
+            if name in cal_tools and cal_executor:
+                return cal_executor.execute(name, args)
+            return mail_executor.execute(name, args)
 
         messages = [
             {"role": "system", "content": _build_agent_system(bundle)},
@@ -203,7 +230,7 @@ class StreamlitRouter:
                 response = self.mistral.chat.complete(
                     model=ORCHESTRATOR_MODEL,
                     messages=messages,
-                    tools=MAIL_TOOL_SCHEMAS,
+                    tools=all_schemas,
                     tool_choice="auto",
                 )
             except Exception as e:
@@ -246,7 +273,7 @@ class StreamlitRouter:
                     args = {}
 
                 log(f"🔧 **Tool:** `{name}` — `{str(args)[:80]}`")
-                result = executor.execute(name, args)
+                result = execute_tool(name, args)
                 log(f"↩️  `{result[:150]}{'...' if len(result) > 150 else ''}`")
 
                 messages.append({

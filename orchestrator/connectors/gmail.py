@@ -33,11 +33,13 @@ from googleapiclient.errors import HttpError
 
 from context.context_bundle import MailMeta
 
-# Scopes — read + labels + send (send only used after HIL approval)
+# Scopes — read + labels + send + calendar (unified token shared with CalendarConnector)
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/gmail.modify",   # needed for trash
+    "https://www.googleapis.com/auth/calendar",           # full calendar access
+    "https://www.googleapis.com/auth/calendar.readonly",  # explicit read
 ]
 
 

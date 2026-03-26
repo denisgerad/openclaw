@@ -69,6 +69,10 @@ class ContextBundle:
     thread_history: list[dict] = field(default_factory=list)   # [{role, content}]
     search_results: list[dict] = field(default_factory=list)   # [{query, summary, url}]
 
+    # ── Calendar-specific fields ─────────────────────────────────────────────
+    active_event_id: Optional[str] = None     # event currently being acted on
+    calendar_context: list[dict] = field(default_factory=list)  # fetched events cache
+
     # ── HIL staging area ─────────────────────────────────────────────────────
     draft_content: Optional[str] = None          # text staged for human review
     draft_action: Optional[str] = None           # "reply" | "send" | "delete"

@@ -23,6 +23,7 @@ from colorama import Fore, Style, init as colorama_init
 
 from context.context_bundle import ContextBundle
 from orchestrator.connectors.gmail import GmailConnector
+from orchestrator.connectors.calendar import CalendarConnector
 
 colorama_init(autoreset=True)
 
@@ -152,6 +153,7 @@ def review_and_decide(bundle: ContextBundle) -> str:
 def execute_approved_action(
     bundle: ContextBundle,
     gmail: Optional[GmailConnector] = None,
+    calendar: Optional[CalendarConnector] = None,
 ) -> bool:
     """
     Execute whatever action was staged in the bundle, post-approval.
@@ -212,6 +214,76 @@ def execute_approved_action(
                 hil_approved=True,
             )
             print(f"{Fore.GREEN}  ✓ Message moved to Trash.{Style.RESET_ALL}")
+
+        elif action == "create_event" and calendar:
+            import json as _json
+            payload = _json.loads(content)
+            event = calendar.create_event(
+                title=payload["title"],
+                start=payload["start"],
+                end=payload["end"],
+                calendar_id=payload.get("calendar_id", "primary"),
+                description=payload.get("description", ""),
+                location=payload.get("location", ""),
+                attendees=payload.get("attendees", []),
+                timezone=payload.get("timezone", "UTC"),
+                add_google_meet=payload.get("add_google_meet", False),
+                recurrence=payload.get("recurrence") or None,
+            )
+            bundle.record_step(
+                action="create_event", status="success",
+                input_summary=payload["title"],
+                output_summary=f"Created. ID: {event.event_id}",
+                hil_approved=True,
+            )
+            print(f"{Fore.GREEN}  ✓ Event created: {event.title}  ID: {event.event_id}{Style.RESET_ALL}")
+
+        elif action == "update_event" and calendar:
+            import json as _json
+            payload = _json.loads(content)
+            event = calendar.update_event(
+                event_id=payload["event_id"],
+                updates=payload["updates"],
+                calendar_id=payload.get("calendar_id", "primary"),
+            )
+            bundle.record_step(
+                action="update_event", status="success",
+                input_summary=payload["event_id"],
+                output_summary=f"Updated: {event.title}",
+                hil_approved=True,
+            )
+            print(f"{Fore.GREEN}  ✓ Event updated: {event.title}{Style.RESET_ALL}")
+
+        elif action == "delete_event" and calendar:
+            import json as _json
+            payload = _json.loads(content)
+            calendar.delete_event(
+                event_id=payload["event_id"],
+                calendar_id=payload.get("calendar_id", "primary"),
+            )
+            bundle.record_step(
+                action="delete_event", status="success",
+                input_summary=payload["event_id"],
+                output_summary="Event deleted.",
+                hil_approved=True,
+            )
+            print(f"{Fore.GREEN}  ✓ Event deleted: {payload['event_id']}{Style.RESET_ALL}")
+
+        elif action == "rsvp" and calendar:
+            import json as _json
+            payload = _json.loads(content)
+            event = calendar.respond_to_invite(
+                event_id=payload["event_id"],
+                response=payload["response"],
+                calendar_id=payload.get("calendar_id", "primary"),
+            )
+            bundle.record_step(
+                action="rsvp", status="success",
+                input_summary=f"{payload['event_id']} → {payload['response']}",
+                output_summary=f"RSVP sent: {payload['response']}",
+                hil_approved=True,
+            )
+            print(f"{Fore.GREEN}  ✓ RSVP sent: {payload['response']} for {event.title}{Style.RESET_ALL}")
 
         else:
             print(f"{Fore.RED}  ✗ Unknown action or missing connector: {action}{Style.RESET_ALL}")
