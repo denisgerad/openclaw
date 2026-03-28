@@ -1,3 +1,6 @@
+# Personal docs — not part of the project
+my-docs/
+
 # Auth & secrets — never commit these
 .env
 config/credentials.json
